@@ -102,6 +102,36 @@ zathura processes."
                                   zathura-service-iname "filename"))
     (cons file page)))
 
+
+(defun zathura--get-file-path (proc)
+  "Return the file path opened by zathura PROC."
+  (dbus-get-property :session
+                     proc
+                     zathura-service-path
+                     zathura-service-iname
+                     "filename"))
+
+(defun zathura--open-document (proc file &optional page)
+  "Open FILE and jump to PAGE (DEFAULT 0) in zathura PROC."
+  (dbus-call-method :session
+                    proc
+                    zathura-service-path
+                    zathura-service-iname
+                    "OpenDocument"
+                    file
+                    ""
+                    :int32 (or page 0)))
+
+(defun zathura--goto-page (proc page)
+  "Go to PAGE in zathura PROC."
+  (dbus-call-method :session
+                    proc
+                    zathura-service-path
+                    zathura-service-iname
+                    "GotoPage"
+                    :uint32
+                    page))
+
 (defconst zathura--new-process-candidate "[New zathura process]")
 
 (defun zathura--valid-proc-p (proc)
@@ -139,35 +169,6 @@ zathura processes."
                       (propertize "   start new zathura" 'face 'font-lock-comment-face)
                     (zathura--annotate-candidate cand)))))
          (complete-with-action action candidates str pred))))))
-
-(defun zathura--get-file-path (proc)
-  "Return the file path opened by zathura PROC."
-  (dbus-get-property :session
-                     proc
-                     zathura-service-path
-                     zathura-service-iname
-                     "filename"))
-
-(defun zathura--open-document (proc file &optional page)
-  "Open FILE and jump to PAGE (DEFAULT 0) in zathura PROC."
-  (dbus-call-method :session
-                    proc
-                    zathura-service-path
-                    zathura-service-iname
-                    "OpenDocument"
-                    file
-                    ""
-                    :int32 (or page 0)))
-
-(defun zathura--goto-page (proc page)
-  "Go to PAGE in zathura PROC."
-  (dbus-call-method :session
-                    proc
-                    zathura-service-path
-                    zathura-service-iname
-                    "GotoPage"
-                    :uint32
-                    page))
 
 (defun zathura--pdf-file-p (file)
   "Return non-nil if FILE is a PDF file."
@@ -240,6 +241,7 @@ Otherwise choose an existing zathura process or create a new one."
             (zathura--goto-page zathura-session-proc page))
         (zathura--open-document zathura-session-proc file page)))))
 
+
 ;;;###autoload
 (defun zathura (file &optional page)
   "Call zathura with the given `FILE' and `PAGE'."
@@ -256,6 +258,17 @@ the chosen process of `zathura'."
   (cl-destructuring-bind (file . page) (zathura-get-link-details)
     (insert (format "<zathura \"%s\" %s>" file page))))
 
+
+;;;###autoload
+(defun zathura-insert-org-link ()
+  "Insert an Org pdf link to the current page from a zathura process."
+  (interactive)
+  (cl-destructuring-bind (file . page) (zathura-get-link-details)
+    (insert
+     (format "[[pdf:%s::%s][%s]]"
+             file
+             page
+             (read-string "Description: ")))))
 
 ;;;###autoload
 (defun zathura-insert-org-elisp-link ()
