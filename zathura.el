@@ -321,6 +321,22 @@ PATH format is FILE::PAGE."
                  child
                  (append numbers (list i))))))
 
+(defun zathura-org-outline--insert-node (node level file)
+  "Insert outline NODE as an Org heading at LEVEL with a PDF link."
+  (let ((title (or (alist-get 'title node) ""))
+        (page (alist-get 'page node))
+        (children (alist-get 'sub-index node)))
+    (insert (format "%s %s\n"
+                    (make-string level ?*)
+                    title))
+    (when page
+      (insert (format "[[pdf:%s::%s][%s]]\n\n"
+                      (zathura--link-file-path file)
+                      page
+                      title)))
+    (dolist (child children)
+      (zathura-org-outline--insert-node child (1+ level) file))))
+
 (defun zathura-outline-jump ()
   "Jump to the page of the outline item at point."
   (interactive)
@@ -446,6 +462,15 @@ of `zathura'"
   (zathura-outline--display
    (zathura--get-document-index
     (zathura--ensure-session-proc))))
+
+(defun zathura-insert-outline ()
+  "Insert current zathura document outline as Org headings with PDF links."
+  (interactive)
+  (let* ((proc (zathura--ensure-session-proc))
+         (file (zathura--get-file-path proc))
+         (index (zathura--get-document-index proc)))
+    (dolist (node index)
+      (zathura-org-outline--insert-node node 1 file))))
 (provide 'zathura)
 
 ;;; zathura.el ends here
