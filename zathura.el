@@ -36,11 +36,6 @@
 (require 'json)
 (require 'outline)
 
-(defvar zathura-service-path "/org/pwmt/zathura")
-(defvar zathura-service-iname "org.pwmt.zathura")
-(defvar zathura-session-proc nil
-  "Current zathura D-Bus process bound to this buffer.")
-
 (defcustom zathura-link-file-path-type 'absolute
   "How zathura inserts PDF file paths."
   :type '(choice (const :tag "Absolute path" absolute)
@@ -61,6 +56,16 @@
   "Whether to display hierarchical numbers in zathura outline."
   :type 'boolean
   :group 'zathura)
+
+
+(defvar zathura-service-path "/org/pwmt/zathura")
+(defvar zathura-service-iname "org.pwmt.zathura")
+(defvar zathura-session-proc nil
+  "Current zathura D-Bus process bound to this buffer.")
+(defconst zathura--new-process-candidate "[New zathura process]")
+
+
+;;; D-Bus helpers
 
 (defun zathura--get-procs ()
   "Retrieve all the running processes of zathura."
@@ -177,7 +182,8 @@ zathura processes."
                     :uint32
                     (- page 1)))
 
-(defconst zathura--new-process-candidate "[New zathura process]")
+
+;;; Session management
 
 (defun zathura--valid-proc-p (proc)
   (member proc (zathura--get-procs)))
@@ -247,27 +253,50 @@ Set and return `zathura-session-proc'."
            choice))))))
   zathura-session-proc)
 
-(defun zathura--pdf-file-p (file)
-  "Return non-nil if FILE is a PDF file."
-  (string-equal (downcase (or (file-name-extension file) ""))
-                "pdf"))
+;;; File opening / viewing
 
-(defun zathura--find-file-advice (orig-fun filename &rest args)
-  "Open PDF files with `zathura-open-file' instead of visiting them."
-  (if (zathura--pdf-file-p filename)
-      (progn
-        (zathura-open-file filename)
-        nil)
-    (apply orig-fun filename args)))
+(defun zathura--open-file (file page keep-focus)
+  "Open FILE at PAGE.
+If KEEP-FOCUS is non-nil, restore Emacs focus after opening."
+  (let* ((frame (selected-frame))
+         (file (expand-file-name file))
+         (page (or page 1))
+         (proc (condition-case nil
+                   (zathura--ensure-session-proc)
+                 (user-error
+                  (zathura--select-session-proc file))))
+         (current-file (zathura--get-file-path proc)))
+    (if (string= current-file file)
+        (zathura--goto-page proc page)
+      (zathura--open-document proc file (1- page)))
+    (when keep-focus
+      (select-frame-set-input-focus frame))))
 
-(defun zathura-open-link (path _)
-  "Open Org pdf link PATH with zathura.
-PATH format is FILE::PAGE."
+(defun zathura--view-page (page)
+  "Go to PAGE in zathura and keep Emacs focused."
+  (let ((frame (selected-frame)))
+    (zathura--goto-page
+     (zathura--ensure-session-proc)
+     page)
+    (select-frame-set-input-focus frame)))
+
+(defun zathura--jump-page (page)
+  "Go to PAGE in zathura and let zathura keep focus."
+  (zathura--goto-page
+   (zathura--ensure-session-proc)
+   page))
+
+
+;;; Org link
+
+(defun zathura--open-link (path keep-focus)
+  "Open Org pdf link PATH.
+If KEEP-FOCUS is non-nil, restore Emacs focus after opening."
   (let* ((parts (split-string path "::"))
          (file (car parts))
          (page (when-let ((page-str (cadr parts)))
                  (string-to-number page-str))))
-    (zathura-open-file file page)))
+    (zathura--open-file file page keep-focus)))
 
 (defun zathura--link-file-path (file)
   "Return FILE formatted according to `zathura-link-file-path-type'."
@@ -277,6 +306,28 @@ PATH format is FILE::PAGE."
     (_
      (expand-file-name file))))
 
+(defun zathura--format-org-link (file page description)
+  "Return an Org pdf link to FILE PAGE with DESCRIPTION."
+  (format "[[pdf:%s::%s][%s]]"
+          (zathura--link-file-path file)
+          page
+          description))
+
+(defun zathura--pdf-file-p (file)
+  "Return non-nil if FILE is a PDF file."
+  (string-equal (downcase (or (file-name-extension file) ""))
+                "pdf"))
+
+(defun zathura--find-file-advice (orig-fun filename &rest args)
+  "Open PDF files with `zathura-view-file' instead of visiting them."
+  (if (zathura--pdf-file-p filename)
+      (progn
+        (zathura-view-file filename)
+        nil)
+    (apply orig-fun filename args)))
+
+
+;;; Outline buffer
 
 (define-derived-mode zathura-outline-mode outline-mode "Zathura-Outline"
   "Major mode for zathura outline."
@@ -287,6 +338,39 @@ PATH format is FILE::PAGE."
                        zathura-outline-indent))))
   (setq buffer-read-only t)
   (setq truncate-lines t))
+
+
+(defun zathura-outline-view ()
+  "View the page of the outline item at point, keeping Emacs focused."
+  (interactive)
+  (let ((page (get-text-property (line-beginning-position)
+                                 'zathura-page)))
+    (unless page
+      (user-error "No page on this line"))
+    (zathura--view-page page)))
+
+(defun zathura-outline-jump ()
+  "Jump to the page of the outline item at point, focusing zathura."
+  (interactive)
+  (let ((page (get-text-property (line-beginning-position)
+                                 'zathura-page)))
+    (unless page
+      (user-error "No page on this line"))
+    (zathura--jump-page page)))
+
+(defun zathura-outline--display (index)
+  "Display zathura document INDEX."
+  (let ((buf (get-buffer-create "*zathura-outline*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (zathura-outline-mode)
+        (cl-loop for node in index
+                 for i from 1
+                 do (zathura-outline--insert-node node (list i)))
+        (goto-char (point-min))))
+    (pop-to-buffer buf)))
+
 
 (defun zathura-outline--number-string (numbers)
   "Return outline number string from NUMBERS."
@@ -330,38 +414,13 @@ PATH format is FILE::PAGE."
                     (make-string level ?*)
                     title))
     (when page
-      (insert (format "[[pdf:%s::%s][%s]]\n\n"
-                      (zathura--link-file-path file)
-                      page
-                      title)))
+      (insert (zathura--format-org-link
+               file
+               page
+               title)
+              "\n\n"))
     (dolist (child children)
       (zathura-org-outline--insert-node child (1+ level) file))))
-
-(defun zathura-outline-jump ()
-  "Jump to the page of the outline item at point."
-  (interactive)
-  (let ((page (get-text-property (line-beginning-position)
-                                 'zathura-page))
-        (frame (selected-frame)))
-    (unless page
-      (user-error "No page on this line"))
-    (zathura--goto-page
-     (zathura--ensure-session-proc)
-     page)
-    (select-frame-set-input-focus frame)))
-
-(defun zathura-outline--display (index)
-  "Display zathura document INDEX."
-  (let ((buf (get-buffer-create "*zathura-outline*")))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (zathura-outline-mode)
-        (cl-loop for node in index
-                 for i from 1
-                 do (zathura-outline--insert-node node (list i)))
-        (goto-char (point-min))))
-    (pop-to-buffer buf)))
 
 ;;;###autoload
 (define-minor-mode zathura-mode
@@ -372,32 +431,51 @@ PATH format is FILE::PAGE."
       (progn
         (advice-add 'find-file :around #'zathura--find-file-advice)
         (with-eval-after-load 'org
-          (add-to-list 'org-file-apps '("\\.pdf\\'" . zathura-open-file))
-          (org-link-set-parameters "pdf" :follow #'zathura-open-link)))
+          (add-to-list 'org-file-apps '("\\.pdf\\'" . zathura-view-file))
+          (org-link-set-parameters "pdf" :follow #'zathura-view-link)))
     (advice-remove 'find-file #'zathura--find-file-advice)
     (with-eval-after-load 'org
       (setq org-file-apps
-            (remove '("\\.pdf\\'" . zathura-open-file) org-file-apps))
+            (remove '("\\.pdf\\'" . zathura-view-file) org-file-apps))
       )))
 
 ;;;###autoload
-(defun zathura-open-file (file &optional page)
-  "Open FILE in the current zathura session.
-If `zathura-session-proc' is already bound and alive, use it.
-Otherwise choose an existing zathura process or create a new one."
+(defun zathura-view-file (file &optional page)
+  "Open FILE at PAGE in zathura and keep Emacs focused."
   (interactive
-   (list (read-file-name "Open PDF: " nil nil t)
+   (list (read-file-name "View PDF: " nil nil t)
          current-prefix-arg))
-  (setq file (expand-file-name file))
-  (let* ((page (or page 0))
-         (proc (condition-case nil
-                   (zathura--ensure-session-proc)
-                 (user-error
-                  (zathura--select-session-proc file))))
-         (current-file (zathura--get-file-path proc)))
-    (if (string= current-file file)
-        (zathura--goto-page proc page)
-      (zathura--open-document proc file page))))
+  (zathura--open-file file page t))
+
+;;;###autoload
+(defun zathura-jump-file (file &optional page)
+  "Open FILE at PAGE in zathura and let zathura keep focus."
+  (interactive
+   (list (read-file-name "Jump to PDF: " nil nil t)
+         current-prefix-arg))
+  (zathura--open-file file page nil))
+
+;;;###autoload
+(defun zathura-view-link (path _)
+  "View Org pdf link PATH with zathura, keeping Emacs focused."
+  (zathura--open-link path t))
+
+;;;###autoload
+(defun zathura-jump-link (path _)
+  "Jump to Org pdf link PATH with zathura, focusing zathura."
+  (zathura--open-link path nil))
+
+;;;###autoload
+(defun zathura-jump-link-at-point ()
+  "Jump to the Org pdf link at point and focus zathura."
+  (interactive)
+  (let* ((context (org-element-context)))
+    (unless (and (eq (org-element-type context) 'link)
+                 (string= (org-element-property :type context) "pdf"))
+      (user-error "No pdf link at point"))
+    (zathura-jump-link
+     (org-element-property :path context)
+     nil)))
 
 ;;;###autoload
 (defun zathura-select-proc ()
@@ -438,10 +516,10 @@ the chosen process of `zathura'."
     (when (string= file "")
       (user-error "No document open in zathura"))
     (insert
-     (format "[[pdf:%s::%s][%s]]"
-             (zathura--link-file-path file)
-             page
-             (read-string "Description: ")))))
+     (zathura--format-org-link
+      file
+      page
+      (read-string "Description: ")))))
 
 ;;;###autoload
 (defun zathura-insert-org-elisp-link ()
@@ -463,6 +541,7 @@ of `zathura'"
    (zathura--get-document-index
     (zathura--ensure-session-proc))))
 
+;;;###autoload
 (defun zathura-insert-outline ()
   "Insert current zathura document outline as Org headings with PDF links."
   (interactive)
