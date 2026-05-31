@@ -33,7 +33,8 @@
 
 (require 'dbus)
 (require 'cl-lib)
-
+(require 'json)
+(require 'outline)
 
 (defvar zathura-service-path "/org/pwmt/zathura")
 (defvar zathura-service-iname "org.pwmt.zathura")
@@ -44,6 +45,21 @@
   "How zathura inserts PDF file paths."
   :type '(choice (const :tag "Absolute path" absolute)
                  (const :tag "Relative to current buffer" relative))
+  :group 'zathura)
+
+(defcustom zathura-outline-page-column 80
+  "Column used to display page number in zathura outline."
+  :type 'integer
+  :group 'zathura)
+
+(defcustom zathura-outline-indent 2
+  "Indent width for zathura outline."
+  :type 'integer
+  :group 'zathura)
+
+(defcustom zathura-outline-numbered t
+  "Whether to display hierarchical numbers in zathura outline."
+  :type 'boolean
   :group 'zathura)
 
 (defun zathura--get-procs ()
@@ -117,11 +133,28 @@ zathura processes."
 
 (defun zathura--get-page-number (proc)
   "Return the current page of file opened by zathura PROC."
-  (dbus-get-property :session
-                     proc
-                     zathura-service-path
-                     zathura-service-iname
-                     "pagenumber"))
+  (+ (dbus-get-property :session
+                        proc
+                        zathura-service-path
+                        zathura-service-iname
+                        "pagenumber") 1))
+
+
+(defun zathura--get-document-index (proc)
+  "Return parsed document index of zathura PROC."
+  (condition-case nil
+      (alist-get 'index
+                 (json-parse-string
+                  (dbus-get-property :session
+                                     proc
+                                     zathura-service-path
+                                     zathura-service-iname
+                                     "documentinfo")
+                  :object-type 'alist
+                  :array-type 'list))
+    (dbus-error nil)
+    (json-parse-error nil)))
+
 
 (defun zathura--open-document (proc file &optional page)
   "Open FILE and jump to PAGE (DEFAULT 0) in zathura PROC."
@@ -142,7 +175,7 @@ zathura processes."
                     zathura-service-iname
                     "GotoPage"
                     :uint32
-                    page))
+                    (- page 1)))
 
 (defconst zathura--new-process-candidate "[New zathura process]")
 
@@ -238,6 +271,75 @@ PATH format is FILE::PAGE."
      (expand-file-name file))))
 
 
+(define-derived-mode zathura-outline-mode outline-mode "Zathura-Outline"
+  "Major mode for zathura outline."
+  (setq-local outline-regexp "\\( *\\).")
+  (setq-local outline-level
+              (lambda ()
+                (1+ (/ (length (match-string 1))
+                       zathura-outline-indent))))
+  (setq buffer-read-only t)
+  (setq truncate-lines t))
+
+(defun zathura-outline--number-string (numbers)
+  "Return outline number string from NUMBERS."
+  (mapconcat #'number-to-string numbers "."))
+
+
+(defun zathura-outline--insert-node (node numbers)
+  "Insert outline NODE with hierarchical NUMBERS."
+  (let* ((title (or (alist-get 'title node) ""))
+         (page (alist-get 'page node))
+         (children (alist-get 'sub-index node))
+         (level (length numbers))
+         (number (zathura-outline--number-string numbers))
+         (beg (point)))
+    (insert
+     (format "%s%s%s"
+             (make-string (* (1- level) zathura-outline-indent) ?\s)
+             (if zathura-outline-numbered
+                 (format "%s " number)
+               "")
+             title))
+
+    (move-to-column zathura-outline-page-column t)
+    (insert (format "%s\n" page))
+
+    (add-text-properties
+     beg (point)
+     `(zathura-page ,page))
+    (cl-loop for child in children
+             for i from 1
+             do (zathura-outline--insert-node
+                 child
+                 (append numbers (list i))))))
+
+(defun zathura-outline-jump ()
+  "Jump to the page of the outline item at point."
+  (interactive)
+  (let ((page (get-text-property (line-beginning-position)
+                                 'zathura-page))
+        (frame (selected-frame)))
+    (unless page
+      (user-error "No page on this line"))
+    (zathura--goto-page
+     (zathura--ensure-session-proc)
+     page)
+    (select-frame-set-input-focus frame)))
+
+(defun zathura-outline--display (index)
+  "Display zathura document INDEX."
+  (let ((buf (get-buffer-create "*zathura-outline*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (zathura-outline-mode)
+        (cl-loop for node in index
+                 for i from 1
+                 do (zathura-outline--insert-node node (list i)))
+        (goto-char (point-min))))
+    (pop-to-buffer buf)))
+
 ;;;###autoload
 (define-minor-mode zathura-mode
   "View PDF files with zathura from Emacs."
@@ -330,6 +432,13 @@ of `zathura'"
 					(read-string "Description: ")))))
 
 
+;;;###autoload
+(defun zathura-show-outline ()
+  "Show outline of current zathura document."
+  (interactive)
+  (zathura-outline--display
+   (zathura--get-document-index
+    (zathura--ensure-session-proc))))
 (provide 'zathura)
 
 ;;; zathura.el ends here
