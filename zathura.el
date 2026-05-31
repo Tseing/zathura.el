@@ -40,6 +40,11 @@
 (defvar zathura-session-proc nil
   "Current zathura D-Bus process bound to this buffer.")
 
+(defcustom zathura-link-file-path-type 'absolute
+  "How zathura inserts PDF file paths."
+  :type '(choice (const :tag "Absolute path" absolute)
+                 (const :tag "Relative to current buffer" relative))
+  :group 'zathura)
 
 (defun zathura--get-procs ()
   "Retrieve all the running processes of zathura."
@@ -57,20 +62,16 @@
 
 (defun zathura--annotate-candidate (proc)
   "Annotate `PROC' for completion with its file and page."
-  ;; TODO: replace concat with format
-  (propertize (concat "   page "
-                      (format "%s" (dbus-get-property :session
-													  proc
-													  zathura-service-path
-													  zathura-service-iname
-													  "pagenumber"))
-                      " "
-                      (dbus-get-property :session
-                                         proc
-                                         zathura-service-path
-                                         zathura-service-iname
-                                         "filename"))
-              'face 'font-lock-comment-face))
+  (condition-case nil
+      (propertize
+       (format "   %s::%s"
+               (zathura--get-file-path proc)
+               (zathura--get-page-number proc))
+       'face 'font-lock-comment-face)
+    (dbus-error
+     (propertize
+      "   no document open"
+      'face 'font-lock-comment-face))))
 
 
 (defun zathura--pick-process (procs)
@@ -105,11 +106,22 @@ zathura processes."
 
 (defun zathura--get-file-path (proc)
   "Return the file path opened by zathura PROC."
+  (condition-case nil
+      (dbus-get-property :session
+                         proc
+                         zathura-service-path
+                         zathura-service-iname
+                         "filename")
+    (dbus-error "")))
+
+
+(defun zathura--get-page-number (proc)
+  "Return the current page of file opened by zathura PROC."
   (dbus-get-property :session
                      proc
                      zathura-service-path
                      zathura-service-iname
-                     "filename"))
+                     "pagenumber"))
 
 (defun zathura--open-document (proc file &optional page)
   "Open FILE and jump to PAGE (DEFAULT 0) in zathura PROC."
@@ -137,6 +149,14 @@ zathura processes."
 (defun zathura--valid-proc-p (proc)
   (member proc (zathura--get-procs)))
 
+(defun zathura--ensure-session-proc ()
+  "Return live `zathura-session-proc', or signal an error."
+  (unless (and zathura-session-proc
+               (zathura--valid-proc-p zathura-session-proc))
+    (setq zathura-session-proc nil)
+    (user-error "No zathura session process"))
+  zathura-session-proc)
+
 (defun zathura--start-new-proc-with-file (file)
   "Start a new zathura process with FILE and return its D-Bus name."
   (let ((before (zathura--get-procs))
@@ -154,21 +174,38 @@ zathura processes."
     (or new
         (error "Failed to start zathura D-Bus process"))))
 
-(defun zathura--pick-or-new-process ()
-  "Pick an existing zathura process, or choose to create a new one."
-  (let* ((procs (zathura--get-procs))
-         (candidates (append procs (list zathura--new-process-candidate))))
-    (completing-read
-     "Select zathura process: "
-     (lambda (str pred action)
-       (if (eq action 'metadata)
-           '(metadata
-             (annotation-function
-              . (lambda (cand)
-                  (if (string= cand zathura--new-process-candidate)
-                      (propertize "   start new zathura" 'face 'font-lock-comment-face)
-                    (zathura--annotate-candidate cand)))))
-         (complete-with-action action candidates str pred))))))
+(defun zathura--select-session-proc (file)
+  "Select or create a zathura session process for FILE.
+Set and return `zathura-session-proc'."
+  (let ((procs (zathura--get-procs)))
+    (setq zathura-session-proc
+          (cond
+           ;; no proc, create proc and open file
+           ((null procs)
+            (zathura--start-new-proc-with-file file))
+
+           ;; proc existed, let user to select existed proc or new proc
+           (t
+            (let* ((candidates
+                    (append procs (list zathura--new-process-candidate)))
+                   (choice
+                    (completing-read
+                     "Select zathura process: "
+                     (lambda (str pred action)
+                       (if (eq action 'metadata)
+                           '(metadata
+                             (display-sort-function . identity)
+                             (annotation-function
+                              . (lambda (cand)
+                                  (if (string= cand zathura--new-process-candidate)
+                                      (propertize "   start new zathura"
+                                                  'face 'font-lock-comment-face)
+                                    (zathura--annotate-candidate cand)))))
+                         (complete-with-action action candidates str pred))))))
+              (if (string= choice zathura--new-process-candidate)
+                  (zathura--start-new-proc-with-file file)
+                choice))))))
+  zathura-session-proc)
 
 (defun zathura--pdf-file-p (file)
   "Return non-nil if FILE is a PDF file."
@@ -191,6 +228,15 @@ PATH format is FILE::PAGE."
          (page (when-let ((page-str (cadr parts)))
                  (string-to-number page-str))))
     (zathura-open-file file page)))
+
+(defun zathura--link-file-path (file)
+  "Return FILE formatted according to `zathura-link-file-path-type'."
+  (pcase zathura-link-file-path-type
+    ('relative
+     (file-relative-name (expand-file-name file) default-directory))
+    (_
+     (expand-file-name file))))
+
 
 ;;;###autoload
 (define-minor-mode zathura-mode
@@ -218,29 +264,27 @@ Otherwise choose an existing zathura process or create a new one."
    (list (read-file-name "Open PDF: " nil nil t)
          current-prefix-arg))
   (setq file (expand-file-name file))
-  (let ((page (or page 0)))
-    (unless (and zathura-session-proc
-                 (zathura--valid-proc-p zathura-session-proc))
-      (let ((procs (zathura--get-procs)))
-        (setq zathura-session-proc
-              (cond
-               ((null procs)
-                (zathura--start-new-proc-with-file file))
-               ((= (length procs) 1)
-                (car procs))
-               (t
-                (let ((choice (zathura--pick-or-new-process)))
-                  (if (string= choice zathura--new-process-candidate)
-                      (zathura--start-new-proc-with-file file)
-                    choice)))))))
+  (let* ((page (or page 0))
+         (proc (condition-case nil
+                   (zathura--ensure-session-proc)
+                 (user-error
+                  (zathura--select-session-proc file))))
+         (current-file (zathura--get-file-path proc)))
+    (if (string= current-file file)
+        (zathura--goto-page proc page)
+      (zathura--open-document proc file page))))
 
-    ;; Existing proc: open file or goto page
-    (let ((current-file (zathura--get-file-path zathura-session-proc)))
-      (if (string= current-file file)
-          (when page
-            (zathura--goto-page zathura-session-proc page))
-        (zathura--open-document zathura-session-proc file page)))))
-
+;;;###autoload
+(defun zathura-select-proc ()
+  "Select an existing zathura process and bind it as `zathura-session-proc'."
+  (interactive)
+  (let ((procs (zathura--get-procs)))
+    (unless procs
+      (user-error "No zathura process is running"))
+    (setq zathura-session-proc
+          (zathura--pick-process procs))
+    (message "Selected zathura process: %s" zathura-session-proc)
+    zathura-session-proc))
 
 ;;;###autoload
 (defun zathura (file &optional page)
@@ -261,12 +305,16 @@ the chosen process of `zathura'."
 
 ;;;###autoload
 (defun zathura-insert-org-link ()
-  "Insert an Org pdf link to the current page from a zathura process."
+  "Insert an Org pdf link to the current page from the zathura session."
   (interactive)
-  (cl-destructuring-bind (file . page) (zathura-get-link-details)
+  (let* ((proc (zathura--ensure-session-proc))
+         (file (zathura--get-file-path proc))
+         (page (zathura--get-page-number proc)))
+    (when (string= file "")
+      (user-error "No document open in zathura"))
     (insert
      (format "[[pdf:%s::%s][%s]]"
-             file
+             (zathura--link-file-path file)
              page
              (read-string "Description: ")))))
 
