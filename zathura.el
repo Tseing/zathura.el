@@ -186,8 +186,15 @@ zathura processes."
   "Return live `zathura-session-proc', or signal an error."
   (unless (and zathura-session-proc
                (zathura--valid-proc-p zathura-session-proc))
-    (setq zathura-session-proc nil)
+    (zathura--assign-session-proc nil)
     (user-error "No zathura session process"))
+  zathura-session-proc)
+
+(defun zathura--assign-session-proc (proc)
+  "Assign PROC as current `zathura-session-proc' and refresh outline buffer."
+  (setq zathura-session-proc proc)
+  (when (get-buffer "*zathura-outline*")
+    (zathura-show-outline))
   zathura-session-proc)
 
 (defun zathura--start-new-proc-with-file (file)
@@ -211,33 +218,33 @@ zathura processes."
   "Select or create a zathura session process for FILE.
 Set and return `zathura-session-proc'."
   (let ((procs (zathura--get-procs)))
-    (setq zathura-session-proc
-          (cond
-           ;; no proc, create proc and open file
-           ((null procs)
-            (zathura--start-new-proc-with-file file))
+    (zathura--assign-session-proc
+     (cond
+      ;; no proc, create proc and open file
+      ((null procs)
+       (zathura--start-new-proc-with-file file))
 
-           ;; proc existed, let user to select existed proc or new proc
-           (t
-            (let* ((candidates
-                    (append procs (list zathura--new-process-candidate)))
-                   (choice
-                    (completing-read
-                     "Select zathura process: "
-                     (lambda (str pred action)
-                       (if (eq action 'metadata)
-                           '(metadata
-                             (display-sort-function . identity)
-                             (annotation-function
-                              . (lambda (cand)
-                                  (if (string= cand zathura--new-process-candidate)
-                                      (propertize "   start new zathura"
-                                                  'face 'font-lock-comment-face)
-                                    (zathura--annotate-candidate cand)))))
-                         (complete-with-action action candidates str pred))))))
-              (if (string= choice zathura--new-process-candidate)
-                  (zathura--start-new-proc-with-file file)
-                choice))))))
+      ;; proc existed, let user to select existed proc or new proc
+      (t
+       (let* ((candidates
+               (append procs (list zathura--new-process-candidate)))
+              (choice
+               (completing-read
+                "Select zathura process: "
+                (lambda (str pred action)
+                  (if (eq action 'metadata)
+                      '(metadata
+                        (display-sort-function . identity)
+                        (annotation-function
+                         . (lambda (cand)
+                             (if (string= cand zathura--new-process-candidate)
+                                 (propertize "   start new zathura"
+                                             'face 'font-lock-comment-face)
+                               (zathura--annotate-candidate cand)))))
+                    (complete-with-action action candidates str pred))))))
+         (if (string= choice zathura--new-process-candidate)
+             (zathura--start-new-proc-with-file file)
+           choice))))))
   zathura-session-proc)
 
 (defun zathura--pdf-file-p (file)
@@ -383,8 +390,8 @@ Otherwise choose an existing zathura process or create a new one."
   (let ((procs (zathura--get-procs)))
     (unless procs
       (user-error "No zathura process is running"))
-    (setq zathura-session-proc
-          (zathura--pick-process procs))
+    (zathura--assign-session-proc
+     (zathura--pick-process procs))
     (message "Selected zathura process: %s" zathura-session-proc)
     zathura-session-proc))
 
