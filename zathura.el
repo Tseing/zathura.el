@@ -85,9 +85,9 @@
   "Annotate `PROC' for completion with its file and page."
   (condition-case nil
       (propertize
-       (format "   %s::%s"
-               (zathura--get-file-path proc)
-               (zathura--get-page-number proc))
+       (format "   p.%s %s"
+               (zathura--get-page-number proc)
+               (abbreviate-file-name (zathura--get-file-path proc)))
        'face 'font-lock-comment-face)
     (dbus-error
      (propertize
@@ -210,12 +210,13 @@ zathura processes."
     (start-process "zathura" nil "zathura" file)
 
     ;; wait zathura session bus
-    (dotimes (_ 20)
-      (sleep-for 0.1)
-      (setq after (zathura--get-procs))
-      (setq new (car (cl-set-difference after before :test #'string=)))
-      (when new
-        (cl-return)))
+    (cl-block nil
+      (dotimes (_ 20)
+        (sleep-for 0.1)
+        (setq after (zathura--get-procs))
+        (setq new (car (cl-set-difference after before :test #'string=)))
+        (when new
+          (cl-return))))
 
     (or new
         (error "Failed to start zathura D-Bus process"))))
@@ -340,6 +341,9 @@ If KEEP-FOCUS is non-nil, restore Emacs focus after opening."
   (setq truncate-lines t))
 
 
+(define-key zathura-outline-mode-map (kbd "RET") #'zathura-outline-view)
+(define-key zathura-outline-mode-map (kbd "q") #'bury-buffer)
+
 (defun zathura-outline-view ()
   "View the page of the outline item at point, keeping Emacs focused."
   (interactive)
@@ -421,6 +425,12 @@ If KEEP-FOCUS is non-nil, restore Emacs focus after opening."
               "\n\n"))
     (dolist (child children)
       (zathura-org-outline--insert-node child (1+ level) file))))
+
+(defvar zathura-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "M-o") #'zathura-show-outline)
+    map)
+  "Keymap for `zathura-mode'.")
 
 ;;;###autoload
 (define-minor-mode zathura-mode
