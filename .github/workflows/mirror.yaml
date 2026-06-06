@@ -1,0 +1,46 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Sync upstream
+        run: |
+          set -eux
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote remove upstream || true
+          git remote add upstream https://codeberg.org/treflip/zathura.el.git
+          git fetch upstream master --tags
+
+          # Pure branch: exactly upstream/master.
+          git push origin refs/remotes/upstream/master:refs/heads/mirror --force-with-lease
+
+          # Managed default branch:
+          # upstream/master + local GitHub workflow commit(s).
+          git checkout master
+          git rebase refs/remotes/upstream/master
+
+          git push origin master --force-with-lease
+          git push origin refs/tags/*:refs/tags/* || true
